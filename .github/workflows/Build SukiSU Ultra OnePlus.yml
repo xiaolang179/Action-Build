@@ -153,18 +153,14 @@ jobs:
           fi
           echo "📥 下载完成，开始提取 revision..."
 
-          # 解析 revision 字符串
           REVISION=$(grep -oP '<project[^>]+revision="\K[^"]+' "$XML_PATH" | head -n1 || true)
           echo "解析 FILE 获取 CPU 和 ANDROID_VERSION..."
-          # 提取 CPU
           CPU=$(echo "$REVISION" | sed -E 's#^oneplus/([^_]+).*#\1#')
-          # 提取 ANDROID_VERSION
           ANDROID_VERSION=$(echo "$REVISION" | grep -oP '\d{1,2}\.\d{1,2}(\.\d{1,2})?')
           if [[ -n "$CPU" && -n "$ANDROID_VERSION" ]]; then
             echo "✅ CPU=$CPU, ANDROID_VERSION=$ANDROID_VERSION"
             echo "CPU=$CPU" >> $GITHUB_ENV
             echo "ANDROID_VERSION=$ANDROID_VERSION" >> $GITHUB_ENV
-            # 获取短位 Android 版本号
             echo "ANDROID_SHORT_VERSION=${ANDROID_VERSION%%.*}" >> $GITHUB_ENV
           else
             echo "❌ 无法从 revision 中提取 CPU 或 ANDROID_VERSION"
@@ -186,7 +182,6 @@ jobs:
           else
             echo "❌ README.md 下载失败或为空"
           fi
-          # 传递组合信息
           echo "value=${FILE_BASE}_Android${ANDROID_VERSION}" >> "$GITHUB_OUTPUT"
 
       - name: Debug Show Selected Inputs
@@ -261,10 +256,10 @@ jobs:
           mkdir -p "$APT_CACHE_DIR/lists/partial"
           sudo apt -o Dir::Cache="$APT_CACHE_DIR" update -qq
           sudo DEBIAN_FRONTEND=noninteractive apt -o Dir::Cache="$APT_CACHE_DIR" install -yq --no-install-recommends \
-            python3 git curl ccache libelf-dev \
-            build-essential flex bison libssl-dev \
-            libncurses-dev liblz4-tool zlib1g-dev \
-            libxml2-utils rsync unzip
+            python3 python-is-python3 jq wget curl unzip xz-utils ccache \
+            build-essential flex bison libssl-dev pkg-config \
+            libelf-dev libncurses-dev liblz4-tool zlib1g-dev \
+            libxml2-utils rsync dwarves bc lzop cpio
 
       - name: Restore Ccache
         uses: actions/cache@v3
@@ -315,7 +310,6 @@ jobs:
       - name: Kernel Version Handling
         run: |
           cd kernel_workspace/kernel_platform
-          # 获取内核 Android 版本号(KANDROID_VERSION)以及内核版本号(KERNEL_VERSION)
           for f in ./common/build.config.constants ./common/build.config.common; do
             if [ -f "$f" ]; then
               BRANCH=$(grep -m1 '^BRANCH=' "$f" | cut -d= -f2)
@@ -330,13 +324,7 @@ jobs:
             echo "No BRANCH found in build.config files"
           fi
 
-          # 从 Makefile 获取完整内核版本号(TKERNEL_VERSION)以及可选的修改内核等级
           ORIG_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
-
-          # 强制修改 SUBLEVEL(内核等级)，默认关闭
-          # sed -i 's/^SUBLEVEL[[:space:]]*=[[:space:]]*.*/SUBLEVEL = 99/' ./common/Makefile
-
-          # 读取修改后的版本
           NEW_VERSION=$(awk '/^VERSION =/ {v=$3} /^PATCHLEVEL =/ {p=$3} /^SUBLEVEL =/ {s=$3} END {print v"."p"."s}' ./common/Makefile)
 
           if [ "$ORIG_VERSION" != "$NEW_VERSION" ]; then
@@ -347,7 +335,6 @@ jobs:
             echo "TKERNEL_VERSION=$ORIG_VERSION" >> $GITHUB_ENV
           fi
 
-      # 自定义内核后缀
       - name: Custom Kernel Suffix if set
         if: ${{ github.event.inputs.SUFFIX != '' }}
         run: |
@@ -365,24 +352,19 @@ jobs:
 
             echo "Modifying: $path"
 
-            # Remove -dirty
             sed -i 's/ -dirty//g' "$path"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
               echo "Detected NEW setlocalversion format"
               sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${KANDROID_VERSION}-${SUFFIX}\"|" "$path"
-
             elif grep -q 'echo "\$res"' "$path"; then
               echo "Detected OLD setlocalversion format"
               if [ "$FAST_BUILD" = "true" ]; then
-                echo "FAST_BUILD enabled: using static res"
                 sed -i "s/^res=.*/res=\"-${KANDROID_VERSION}-${SUFFIX}\"/" "$path"
               else
-                echo "Standard build: injecting suffix via cut/echo"
                 if [[ -f ./kernel_platform/build_with_bazel.py ]]; then
-                  echo "使用官方脚本编译且当使用 build_with_bazel 时，可能受特殊符号数量限制，编译失败请修改"
-                  echo "When using the official script and building with build_with_bazel, the build may fail due to a limit on the number of special characters. Please modify the configuration if that happens."
+                  echo "When using build_with_bazel, special chars may cause failure."
                 fi
                 tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp" && mv "$path.tmp" "$path"
               fi
@@ -397,7 +379,6 @@ jobs:
           git add -A
           git commit -m "Custom suffix & removed -dirty"
 
-      # 伪官方格式的随机后缀（仅在 SUFFIX 未设置时生效）*
       - name: Custom Kernel Random Suffix if empty
         if: ${{ github.event.inputs.SUFFIX == '' }}
         run: |
@@ -405,7 +386,6 @@ jobs:
           KANDROID_VERSION="${{ env.KANDROID_VERSION }}"
           FAST_BUILD="${{ github.event.inputs.FAST_BUILD }}"
 
-          # 生成随机数字和随机hash
           RANDOM_DIGIT=$(od -An -N1 -tu1 < /dev/urandom | tr -d '[:space:]' | awk '{print $1 % 11}')
           RANDOM_HASH=$(od -An -N7 -tx1 /dev/urandom | tr -d ' \n')
           RANDOM_SUFFIX="${RANDOM_DIGIT}-o-g${RANDOM_HASH}"
@@ -419,21 +399,17 @@ jobs:
 
             echo "Modifying: $path"
 
-            # Remove -dirty
             sed -i 's/ -dirty//g' "$path"
             sed -i '$i res=$(echo "$res" | sed '\''s/-dirty//g'\'')' "$path"
 
             if grep -q 'KERNELVERSION.*scm_version' "$path"; then
               echo "Detected NEW setlocalversion format"
               sed -i "s|echo \"\${KERNELVERSION}.*scm_version}\"|echo \"\${KERNELVERSION}-${KANDROID_VERSION}-${RANDOM_SUFFIX}\"|" "$path"
-
             elif grep -q 'echo "\$res"' "$path"; then
               echo "Detected OLD setlocalversion format"
               if [ "$FAST_BUILD" = "true" ]; then
-                echo "FAST_BUILD enabled: using static res with random suffix"
                 sed -i "s/^res=.*/res=\"-${KANDROID_VERSION}-${RANDOM_SUFFIX}\"/" "$path"
               else
-                echo "Standard build: injecting random suffix via cut/echo"
                 tac "$path" | sed "0,/echo \"\\\$res\"/s//res=\\\$(echo \\\$res | cut -d- -f1-2)-${RANDOM_SUFFIX}; echo \"\\\$res\";/" | tac > "$path.tmp" && mv "$path.tmp" "$path"
               fi
             else
@@ -461,7 +437,6 @@ jobs:
           curl -LSs "https://raw.githubusercontent.com/SukiSU-Ultra/SukiSU-Ultra/main/kernel/setup.sh" | bash -s "$BRANCH_NAME"
           cd ./KernelSU
 
-          # 如果指定了手动 hash，就切换到该提交
           if [[ -n "$MANUAL_HASH" ]]; then
             git fetch origin "$BRANCH_NAME" --depth=50
             git checkout "$MANUAL_HASH"
@@ -481,14 +456,12 @@ jobs:
           echo "GIT_HASH=$GIT_HASH"
 
           if [[ -n "$MANUAL_HASH" ]]; then
-            # 有手动 hash 的情况
             if [[ "$CUSTOM_TAG" == "F" || "$CUSTOM_TAG" == "f" || -z "$CUSTOM_TAG" ]]; then
               VERSION_FULL="v$KSU_API_VERSION-$SHORT_HASH@$BRANCH_NAME"
             else
               VERSION_FULL="v$KSU_API_VERSION-$CUSTOM_TAG@$BRANCH_NAME[$SHORT_HASH]"
             fi
           else
-            # 无手动 hash，使用最新 commit
             if [[ "$CUSTOM_TAG" == "F" || "$CUSTOM_TAG" == "f" || -z "$CUSTOM_TAG" ]]; then
               VERSION_FULL="v$KSU_API_VERSION-$GIT_HASH@$BRANCH_NAME"
             else
@@ -581,7 +554,6 @@ jobs:
           patch -p1 -F 3 < 69_hide_stuff.patch
           echo "隐藏应用_patch完成"
 
-      # OGKI转换GKI，无需修改 dtbo 开机
       - name: Apply Convert HMBIRD_OGKI to HMBIRD_GKI
         if: ${{ env.KERNEL_VERSION == '6.6' }}
         run: |
@@ -637,20 +609,15 @@ jobs:
           curl -LSs https://raw.githubusercontent.com/vc-teahouse/Baseband-guard/main/setup.sh | bash
           sed -i '/^config LSM$/,/^help$/{ /^[[:space:]]*default/ { /baseband_guard/! s/bpf/bpf,baseband_guard/ } }' ./security/Kconfig
 
-      # 配置信息,带*为附加项目,具有一定危险性和不确定性
       - name: Add Configuration Settings
         run: |
           cd kernel_workspace/kernel_platform
           CONFIG_FILE=./common/arch/arm64/configs/gki_defconfig
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
 
-          # SukiSU Ultra配置
           echo "CONFIG_KSU=y" >> "$CONFIG_FILE"
-
-          # KPM配置
           echo "CONFIG_KPM=y" >> "$CONFIG_FILE"
 
-          # HOOK配置
           if [ "${{ github.event.inputs.HOOK }}" = "kprobe" ]; then
             echo "CONFIG_KSU_SUSFS_SUS_SU=y" >> "$CONFIG_FILE"
             echo "CONFIG_KPROBES=y" >> "$CONFIG_FILE"
@@ -663,7 +630,6 @@ jobs:
             echo "CONFIG_KSU_TRACEPOINT_HOOK=y" >> "$CONFIG_FILE" 
           fi
 
-          # SUSFS配置
           echo "CONFIG_KSU_SUSFS=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_HAS_MAGIC_MOUNT=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_SUS_PATH=y" >> "$CONFIG_FILE"
@@ -680,11 +646,9 @@ jobs:
           echo "CONFIG_KSU_SUSFS_SPOOF_CMDLINE_OR_BOOTCONFIG=y" >> "$CONFIG_FILE"
           echo "CONFIG_KSU_SUSFS_OPEN_REDIRECT=y" >> "$CONFIG_FILE"
 
-          # TMPFS配置*
           echo "CONFIG_TMPFS_XATTR=y" >> "$CONFIG_FILE"
           echo "CONFIG_TMPFS_POSIX_ACL=y" >> "$CONFIG_FILE"
 
-          # BBR配置*
           echo "CONFIG_TCP_CONG_ADVANCED=y" >> "$CONFIG_FILE"
           echo "CONFIG_TCP_CONG_BBR=y" >> "$CONFIG_FILE"
           echo "CONFIG_NET_SCH_FQ=y" >> "$CONFIG_FILE"
@@ -692,13 +656,11 @@ jobs:
           echo "CONFIG_TCP_CONG_WESTWOOD=n" >> "$CONFIG_FILE"
           echo "CONFIG_TCP_CONG_HTCP=n" >> "$CONFIG_FILE"
 
-          # ECN配置*
           echo "CONFIG_IP_ECN=y" >> "$CONFIG_FILE"
           echo "CONFIG_TCP_ECN=y" >> "$CONFIG_FILE"
           echo "CONFIG_IPV6_ECN=y" >> "$CONFIG_FILE"
           echo "CONFIG_IP_NF_TARGET_ECN=y" >> "$CONFIG_FILE"
 
-          # ZRAM配置*
           if [ "${{ github.event.inputs.ZRAM }}" = "true" ]; then
             echo "CONFIG_CRYPTO_LZ4HC=y" >> "$CONFIG_FILE"
             echo "CONFIG_CRYPTO_LZ4K=y" >> "$CONFIG_FILE"
@@ -708,15 +670,12 @@ jobs:
             echo "CONFIG_ZRAM_WRITEBACK=y" >> "$CONFIG_FILE"
           fi
 
-          # LSM配置*
           if [ "${{ github.event.inputs.LSM }}" = "true" ]; then
             echo "CONFIG_BBG=y" >> "$CONFIG_FILE"
           fi
 
-          # 移除构建审查
           sed -i 's/check_defconfig//' ./common/build.config.gki
 
-      # Custom kernel build time, without adding #1 SMP PREEMPT 自定义内核构建时间，不要加入#1 SMP PREEMPT
       - name: Custom BUILD_TIME
         shell: bash
         run: |
@@ -757,17 +716,17 @@ jobs:
         if: ${{ github.event.inputs.FAST_BUILD == 'true' }}
         id: fast_build
         run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/_logs"
           KERNEL_VERSION="${{ env.KERNEL_VERSION }}"
           cd kernel_workspace/kernel_platform
 
-          # 自动检测 LLVM_IAS
           if [[ -f ./common/build.config.arm ]] && grep -q '^LLVM_IAS=1' ./common/build.config.arm; then
             USE_LLVM_IAS=true
           else
             USE_LLVM_IAS=false
           fi
 
-          # 从 build.config.common 读取 CLANG_PREBUILT_BIN
           CLANG_PREBUILT_BIN=$(grep '^CLANG_PREBUILT_BIN=' ./common/build.config.common | cut -d'=' -f2 || true)
           if [[ -z "$CLANG_PREBUILT_BIN" ]]; then
             echo "⚠️ CLANG_PREBUILT_BIN 未在 build.config.common 中找到，回退至官方构建脚本"
@@ -776,11 +735,9 @@ jobs:
             exit 0
           fi
 
-          # 优先尝试从 CLANG_PREBUILT_BIN 提取 clang-r 版本
           if [[ "$CLANG_PREBUILT_BIN" =~ (clang-r[0-9a-z]+) ]]; then
             CLANG_VERSION="${BASH_REMATCH[1]}"
           else
-            # 如果未匹配到，尝试从 build.config.constants 提取
             if [[ -f ./common/build.config.constants ]]; then
               CLANG_VERSION=$(grep '^CLANG_VERSION=' ./common/build.config.constants | cut -d'=' -f2 || true)
             fi
@@ -793,11 +750,8 @@ jobs:
             exit 0
           fi
 
-          # 替换成新的 CLANG_VERSION 值
           CLANG_PREBUILT_BIN=${CLANG_PREBUILT_BIN/\$\{CLANG_VERSION\}/$CLANG_VERSION}
-          # 获取 CLANG_PREBUILT_BIN 的第一个目录名，赋值给 CLANG_DIR
           CLANG_DIR=$(echo "$CLANG_PREBUILT_BIN" | cut -d'/' -f1)
-          # 获取 CLANG_PREBUILT_BIN 的上一级目录名，赋值给 CLANG_PATH
           CLANG_PATH=$(basename "$(dirname "$CLANG_PREBUILT_BIN")")
 
           echo "✅ CLANG_VERSION=$CLANG_VERSION"
@@ -808,33 +762,121 @@ jobs:
           export PATH="$GITHUB_WORKSPACE/kernel_workspace/kernel_platform/$CLANG_PREBUILT_BIN:$PATH"
           export PATH="/usr/lib/ccache:$PATH"
           export CC="ccache clang"
-          sudo apt install -y libelf-dev ccache
 
           cd ./common
           MAKE_ARGS="LLVM=1 ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- \
             RUSTC=../../prebuilts/rust/linux-x86/1.73.0b/bin/rustc \
             PAHOLE=../../prebuilts/kernel-build-tools/linux-x86/bin/pahole \
-            LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error"
+            LD=ld.lld HOSTLD=ld.lld KCFLAGS+=-Wno-error V=1"
 
           if [[ "$USE_LLVM_IAS" == "true" ]]; then
             MAKE_ARGS="LLVM_IAS=1 $MAKE_ARGS"
           fi
 
-          make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
-          make -j$(nproc --all) O=out $MAKE_ARGS
-          ccache -s
+          {
+            echo "==== make gki_defconfig ===="
+            make -j$(nproc --all) O=out $MAKE_ARGS gki_defconfig
+            echo "==== make (build) ===="
+            make -j$(nproc --all) O=out $MAKE_ARGS
+            echo "==== ccache -s ===="
+            ccache -s
+          } 2>&1 | tee -a "$GITHUB_WORKSPACE/_logs/build_fast.log"
+
+      - name: Upload FAST build logs on failure
+        if: failure()
+        run: |
+          echo "==== FAST BUILD LOG TAIL ===="
+          if [ -f "$GITHUB_WORKSPACE/_logs/build_fast.log" ]; then
+            tail -n 200 "$GITHUB_WORKSPACE/_logs/build_fast.log" || true
+          else
+            echo "No fast build log found."
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/_logs"
+          {
+            echo "CPU=${{ env.CPU }}"
+            echo "CPUD=${{ env.CPUD }}"
+            echo "ANDROID_VERSION=${{ env.ANDROID_VERSION }}"
+            echo "KANDROID_VERSION=${{ env.KANDROID_VERSION }}"
+            echo "KERNEL_VERSION=${{ env.KERNEL_VERSION }}"
+            echo "TKERNEL_VERSION=${{ env.TKERNEL_VERSION }}"
+            echo "BUILD_METHOD=${{ env.BUILD_METHOD }}"
+            echo "FAST_BUILD=${{ github.event.inputs.FAST_BUILD }}"
+            echo "HOOK=${{ github.event.inputs.HOOK }}"
+            echo "LSM=${{ github.event.inputs.LSM }}"
+            echo "SCHED=${{ github.event.inputs.SCHED }}"
+            echo "ZRAM=${{ github.event.inputs.ZRAM }}"
+          } > "$GITHUB_WORKSPACE/_logs/env.txt"
+          if [ -d kernel_workspace/kernel_platform/KernelSU ]; then
+            (cd kernel_workspace/kernel_platform/KernelSU && git log -1 --oneline) > "$GITHUB_WORKSPACE/_logs/kernelsu_commit.txt" || true
+          fi
+
+      - name: Upload FAST debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAIL-FAST-logs-${{ steps.extract_info.outputs.value || github.event.inputs.FILE }}-${{ github.run_id }}
+          path: |
+            _logs/**
+            kernel_workspace/kernel_platform/common/out/.config
+            kernel_workspace/kernel_platform/common/out/Module.symvers
+            kernel_workspace/kernel_platform/common/Makefile
+            kernel_workspace/kernel_platform/common/build.config.*
+            kernel_workspace/kernel_platform/build_with_bazel.py
+            kernel_workspace/kernel_platform/oplus/build/oplus_build_kernel.sh
+            .repo/manifests_fallback/${{ github.event.inputs.FILE }}.xml
+            .repo/manifests_fallback/README.md
 
       - name: Fallback to Build Kernel
         if: ${{ github.event.inputs.FAST_BUILD == 'false' || steps.fast_build.outputs.fallback == 'true' }}
         run: |
+          set -Eeuo pipefail
+          mkdir -p "$GITHUB_WORKSPACE/_logs"
           cd kernel_workspace
           if [ -f ./kernel_platform/build_with_bazel.py ]; then
-            ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
-            ./kernel_platform/build_with_bazel.py --lto=thin -t ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+            {
+              echo "==== oplus_modules_variant.sh ===="
+              ./kernel_platform/oplus/bazel/oplus_modules_variant.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+              echo "==== build_with_bazel.py ===="
+              ./kernel_platform/build_with_bazel.py --lto=thin -t ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+            } 2>&1 | tee -a "$GITHUB_WORKSPACE/_logs/build_official.log"
           else
-            LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
-            ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+            {
+              echo "==== oplus_build_kernel.sh ===="
+              LTO=thin SYSTEM_DLKM_RE_SIGN=0 BUILD_SYSTEM_DLKM=0 KMI_SYMBOL_LIST_STRICT_MODE=0 \
+              ./kernel_platform/oplus/build/oplus_build_kernel.sh ${{ env.CPUD }} ${{ env.BUILD_METHOD }}
+            } 2>&1 | tee -a "$GITHUB_WORKSPACE/_logs/build_official.log"
           fi
+
+      - name: Upload OFFICIAL build logs on failure
+        if: failure()
+        run: |
+          echo "==== OFFICIAL BUILD LOG TAIL ===="
+          if [ -f "$GITHUB_WORKSPACE/_logs/build_official.log" ]; then
+            tail -n 200 "$GITHUB_WORKSPACE/_logs/build_official.log" || true
+          else
+            echo "No official build log found."
+          fi
+          mkdir -p "$GITHUB_WORKSPACE/_logs"
+          if [ -d kernel_workspace/kernel_platform/KernelSU ]; then
+            (cd kernel_workspace/kernel_platform/KernelSU && git log -1 --oneline) > "$GITHUB_WORKSPACE/_logs/kernelsu_commit.txt" || true
+          fi
+
+      - name: Upload OFFICIAL debug artifacts
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: FAIL-OFFICIAL-logs-${{ steps.extract_info.outputs.value || github.event.inputs.FILE }}-${{ github.run_id }}
+          path: |
+            _logs/**
+            kernel_workspace/kernel_platform/out/.config
+            kernel_workspace/kernel_platform/common/out/.config
+            kernel_workspace/kernel_platform/common/out/Module.symvers
+            kernel_workspace/kernel_platform/common/Makefile
+            kernel_workspace/kernel_platform/common/build.config.*
+            kernel_workspace/kernel_platform/build_with_bazel.py
+            kernel_workspace/kernel_platform/oplus/build/oplus_build_kernel.sh
+            .repo/manifests_fallback/${{ github.event.inputs.FILE }}.xml
+            .repo/manifests_fallback/README.md
 
       - name: Make AnyKernel3
         run: |
